@@ -1,7 +1,3 @@
-package.cpath = package.cpath ..
-    ";/Users/monashsapkota/.vscode/extensions/tangzx.emmylua-0.9.20-darwin-arm64/debugger/emmy/mac/arm64/emmy_core.dylib"
-local dbg = require("emmy_core")
-dbg.tcpListen("localhost", 9966)
 ---@diagnostic disable: undefined-global
 
 local obj = {}
@@ -20,6 +16,7 @@ local WILDCARD_ACTION_MARKER_KEY = "__HAMMERFLOW_WILDCARD_ACTION__"
 obj.auto_reload = false
 obj._userFunctions = {}
 obj._apps = {}
+obj._ui_format = nil
 
 -- lets us package RecursiveBinder with Hammerflow to include
 -- sorting and a bug fix that hasn't been merged upstream yet
@@ -94,10 +91,16 @@ end
 local open = function(link)
     return function() os.execute(string.format("open \"%s\"", link)) end
 end
+local alfred = function(link)
+    return function() os.execute(string.format("open %s", link)) end
+end
 local raycast = function(link)
     -- raycast needs -g to keep current app as "active" for
     -- pasting from emoji picker and window management
     return function() os.execute(string.format("open -g %s", link)) end
+end
+local things = function(link)
+    return function() os.execute(string.format("open %s", link)) end
 end
 local text = function(s)
     return function() hs.eventtap.keyStrokes(s) end
@@ -107,10 +110,7 @@ local keystroke = function(keystroke)
     return function() hs.eventtap.keyStroke(mods, key) end
 end
 local cmd = function(cmd)
-    return function()
-        os.execute(full_command)
-    end
-    -- return function() os.execute(cmd .. " &") end
+    return function() os.execute(cmd .. " &") end
 end
 local code = function(arg) return cmd("open -a 'Visual Studio Code' " .. arg) end
 local launch = function(app)
@@ -119,34 +119,41 @@ end
 local hs_run = function(lua)
     return function() load(lua)() end
 end
-
-local userFunc = function(funcKeyString, pressedKeyValue)
-    local actualFuncName = funcKeyString
-    local argsTable = {}
-
-    if funcKeyString:find("|") then
-        local parts = split(funcKeyString, "|")
-        actualFuncName = table.remove(parts, 1)
-        argsTable = parts
-    end
-
-
-    if pressedKeyValue then -- For {KEY} in function name part
-        actualFuncName = string.gsub(actualFuncName, "{KEY}", pressedKeyValue)
-    end
-    if pressedKeyValue and #argsTable > 0 then -- For {KEY} in args part
-        for i, arg_val in ipairs(argsTable) do
-            argsTable[i] = string.gsub(arg_val, "{KEY}", pressedKeyValue)
-        end
-    end
-
+local menuAction = function(appName, menuPath, label)
     return function()
-        if obj._userFunctions[actualFuncName] then
-            obj._userFunctions[actualFuncName](table.unpack(argsTable))
+        local app
+        if appName and #appName > 0 then
+            app = hs.appfinder.appFromName(appName) or hs.application.get(appName)
         else
+            app = hs.application.frontmostApplication()
+        end
+        if not app then
+            hs.alert("App not found: " .. (appName or "frontmost"), 3)
+            return
+        end
+        local ok = app:selectMenuItem(menuPath, true)
+        if not ok then
+            hs.alert("Menu not found: " .. label, 3)
         end
     end
 end
+local userFunc = function(funcKey)
+    local args = nil
+    -- if funcKey has | in it, split on it. first is function name, rest are args for that function
+    if funcKey:find("|") then
+        local sp = split(funcKey, "|")
+        funcKey = table.remove(sp, 1)
+        args = sp
+    end
+    return function()
+        if obj._userFunctions[funcKey] then
+            obj._userFunctions[funcKey](table.unpack(args or {}))
+        else
+            hs.alert("Unknown function " .. funcKey, 3)
+        end
+    end
+end
+
 local function isApp(app)
     return function()
         local frontApp = hs.application.frontmostApplication()
@@ -184,115 +191,95 @@ local function startswith(s, prefix)
     return s:sub(1, #prefix) == prefix
 end
 
+local function trim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 local function postfix(s)
     --  return the string after the colon
     return s:sub(s:find(":") + 1)
 end
 
-local function getActionAndLabel(actionString)
-    local actionExecutor, label
-
-    local createAction = function(originalActionConstructor, templateString, defaultLabel, isUserFuncFlag)
-        label = defaultLabel or templateString
-
-        return function(actionPressedKeyValue)
-            -- hs.alert.show("HF_CREATE_ACTION_EXECUTOR",
-            --     "Template: " .. templateString ..
-            --     "\nisUserFuncFlag: " .. tostring(isUserFuncFlag), 7) -- DURATION 7
-
-            local finalStringForAction = templateString
-            if actionPressedKeyValue then
-                finalStringForAction = string.gsub(templateString, "{KEY}", actionPressedKeyValue)
-            end
-            -- hs.alert.show("HF_CREATE_ACTION_EXECUTOR",
-            --     "FinalStringForAction: " .. finalStringForAction, 7) -- DURATION 7
-
-            if isUserFuncFlag then
-                userFunc(finalStringForAction, actionPressedKeyValue)()
-            else
-                originalActionConstructor(finalStringForAction)()
-            end
-        end
-    end
-
-    if actionString:find("^http[s]?://") then
-        local displayLabel = actionString:sub(5, 5) == "s" and actionString:sub(9) or actionString:sub(8)
-        if string.len(displayLabel) > 20 then displayLabel = displayLabel:sub(1, 18) .. ".." end
-        actionExecutor = createAction(open, actionString, displayLabel, false)
-    elseif actionString == "reload" then
-        label = actionString
-        actionExecutor = function(actionPressedKeyValue)
-            if actionPressedKeyValue then
-                hs.alert.show("Hammerflow: Warning",
-                    "{KEY} placeholder ignored for 'reload' action.", 2)
-            end
+local function getActionAndLabel(s)
+    if s:find("^http[s]?://") then
+        return open(s), s:sub(5, 5) == "s" and s:sub(9) or s:sub(8)
+    elseif s == "reload" then
+        return function()
             hs.reload()
             hs.console.clearConsole()
+        end, s
+    elseif startswith(s, "alfred://") then
+        return alfred(s), s
+    elseif startswith(s, "raycast://") then
+        return raycast(s), s
+    elseif startswith(s, "things:///") then
+        return things(s), s
+    elseif startswith(s, "hs:") then
+        return hs_run(postfix(s)), s
+    elseif startswith(s, "menu:") then
+        local arg = postfix(s)
+        local appName = nil
+        local pathStr = arg
+        if arg:find("|") then
+            local sp = split(arg, "|")
+            appName = trim(sp[1])
+            pathStr = trim(sp[2] or "")
         end
-    elseif startswith(actionString, "raycast://") then
-        local displayLabel = actionString
-        if string.len(displayLabel) > 20 then displayLabel = displayLabel:sub(1, 18) .. ".." end
-        actionExecutor = createAction(raycast, actionString, displayLabel, false)
-    elseif startswith(actionString, "hs:") then
-        local luaCodeTemplate = postfix(actionString)
-        actionExecutor = createAction(hs_run, luaCodeTemplate, "hs:" .. luaCodeTemplate, false)
-    elseif startswith(actionString, "cmd:") then
-        local cmdTemplate = postfix(actionString)
-        actionExecutor = createAction(cmd, cmdTemplate, "cmd:" .. cmdTemplate, false)
-    elseif startswith(actionString, "input:") then
-        local remainingTemplate = postfix(actionString)
-        local _, tempDisplayLabel = getActionAndLabel(string.gsub(remainingTemplate, "{input}", "<?>"))
-        label = "input->" .. tempDisplayLabel
-        actionExecutor = function(actionPressedKeyValue)
-            local finalRemainingTemplate = remainingTemplate
-            if actionPressedKeyValue then
-                finalRemainingTemplate = string.gsub(remainingTemplate, "{KEY}", actionPressedKeyValue)
-            end
+        local menuPath = split(pathStr, ">")
+        for i = 1, #menuPath do
+            menuPath[i] = trim(menuPath[i])
+        end
+        local label = (appName and (appName .. " | ") or "") .. table.concat(menuPath, " > ")
+        return menuAction(appName, menuPath, label), label
+    elseif startswith(s, "cmd:") then
+        local arg = postfix(s)
+        return cmd(arg), arg
+    elseif startswith(s, "input:") then
+        local remaining = postfix(s)
+        local _, label = getActionAndLabel(remaining)
+        return function()
+            -- user input takes focus and doesn't return it
             local focusedWindow = hs.window.focusedWindow()
-            local button, userInput = hs.dialog.textPrompt("Hammerflow Input",
-                finalRemainingTemplate:gsub("{input}", "<?>"), "", "Submit", "Cancel")
-            if focusedWindow then focusedWindow:focus() end
-            if button == "Cancel" or not userInput then return end
-            local actionStringWithInput = string.gsub(finalRemainingTemplate, "{input}", userInput)
-            local finalInnerActionExecutor, _ = getActionAndLabel(actionStringWithInput)
-            finalInnerActionExecutor()
-        end
-    elseif startswith(actionString, "shortcut:") then
-        local shortcutTemplate = postfix(actionString)
-        actionExecutor = createAction(keystroke, shortcutTemplate, "shortcut:" .. shortcutTemplate, false)
-    elseif startswith(actionString, "function:") then
-        local funcKeyAndArgsTemplate = postfix(actionString)
-        actionExecutor = createAction(nil, funcKeyAndArgsTemplate, "fn:" .. funcKeyAndArgsTemplate, true)
-    elseif startswith(actionString, "code:") then
-        local argTemplate = postfix(actionString)
-        actionExecutor = createAction(code, argTemplate, "code:" .. argTemplate, false)
-    elseif startswith(actionString, "text:") then
-        local textTemplate = postfix(actionString)
-        actionExecutor = createAction(text, textTemplate, "text:" .. textTemplate, false)
-    elseif startswith(actionString, "window:") then
-        local locTemplate = postfix(actionString)
-        label = "win:" .. locTemplate
-        actionExecutor = function(actionPressedKeyValue)
-            local finalLoc = locTemplate
-            if actionPressedKeyValue then
-                finalLoc = string.gsub(locTemplate, "{KEY}", actionPressedKeyValue)
+            local button, userInput = hs.dialog.textPrompt("", "", "", "Submit", "Cancel")
+            -- restore focus
+            focusedWindow:focus()
+
+            if button == "Cancel" then return end
+
+            -- replace text and execute remaining action
+            local replaced = string.gsub(remaining, "{input}", userInput)
+            local action, _ = getActionAndLabel(replaced)
+            action()
+        end, label
+    elseif startswith(s, "shortcut:") then
+        local arg = postfix(s)
+        return keystroke(arg), arg
+    elseif startswith(s, "function:") then
+        local funcKey = postfix(s)
+        return userFunc(funcKey), funcKey .. "()"
+    elseif startswith(s, "code:") then
+        local arg = postfix(s)
+        return code(arg), "code " .. arg
+    elseif startswith(s, "text:") then
+        local arg = postfix(s)
+        return text(arg), arg
+    elseif startswith(s, "window:") then
+        local loc = postfix(s)
+        if windowLocations[loc] then
+            return windowLocations[loc], s
+        else
+            -- regex to parse e.g. 0,0,.5,1 for left half of screen
+            local x, y, w, h = loc:match("^([%.%d]+),%s*([%.%d]+),%s*([%.%d]+),%s*([%.%d]+)$")
+            if not x then
+                hs.alert('Invalid window location: "' .. loc .. '"', nil, nil, 5)
+                return
             end
-            if windowLocations[finalLoc] then
-                windowLocations[finalLoc]()
-            else
-                local x, y, w, h = finalLoc:match("^([%.%d]+),%s*([%.%d]+),%s*([%.%d]+),%s*([%.%d]+)$")
-                if not x then
-                    hs.alert.show('Hammerflow: Invalid window location', '"' .. finalLoc .. '"', 3)
-                    return
-                end
-                move(rect(tonumber(x), tonumber(y), tonumber(w), tonumber(h)))()
-            end
+            return move(rect(tonumber(x), tonumber(y), tonumber(w), tonumber(h))), s
         end
+        return
     else
-        local appNameTemplate = actionString
-        actionExecutor = createAction(launch, appNameTemplate, appNameTemplate, false)
+        return launch(s), s
     end
-    return actionExecutor, label
 end
 
 function obj.loadFirstValidTomlFile(paths)
@@ -337,8 +324,11 @@ function obj.loadFirstValidTomlFile(paths)
     if configFile.show_ui == false then
         spoon.RecursiveBinder.showBindHelper = false
     end
+    if configFile.key_maps_per_line ~= nil then
+        spoon.RecursiveBinder.helperEntryEachLine = configFile.key_maps_per_line
+    end
 
-    spoon.RecursiveBinder.helperFormat = hs.alert.defaultStyle
+    spoon.RecursiveBinder.helperFormat = obj._ui_format or hs.alert.defaultStyle
 
     -- clear settings from table so we don't have to account
     -- for them in the recursive processing function
@@ -347,12 +337,11 @@ function obj.loadFirstValidTomlFile(paths)
     configFile.auto_reload = nil
     configFile.toast_on_reload = nil
     configFile.show_ui = nil
-
+    configFile.key_maps_per_line = nil
 
     local function parseKeyMap(config)
         local keyMap = {}
-        local conditionalActions = nil -- Keep existing conditional logic
-
+        local conditionalActions = nil
         for k, v in pairs(config) do
             if k == "label" then
                 -- continue
@@ -360,108 +349,65 @@ function obj.loadFirstValidTomlFile(paths)
                 for shortName, app in pairs(v) do
                     obj._apps[shortName] = app
                 end
-            elseif k == WILDCARD_ACTION_MARKER_KEY then -- OUR NEW WILDCARD KEY
-                if type(v) == "string" then
-                    local actionExecutor, label = getActionAndLabel(v)
-                    keyMap[WILDCARD_ACTION_MARKER_KEY] = { actionExecutor, label }
-                elseif type(v) == "table" and v[1] then -- Allow ["action_string", "custom label for any"]
-                    local actionExecutor, defaultLabel = getActionAndLabel(v[1])
-                    keyMap[WILDCARD_ACTION_MARKER_KEY] = { actionExecutor, v[2] or defaultLabel }
-                else
-                    hs.alert(
-                        "Hammerflow: Invalid format for " ..
-                        WILDCARD_ACTION_MARKER_KEY .. ". Expected string or table [action, label].", 3)
-                end
-            elseif string.find(k, "_") and not (k == WILDCARD_ACTION_MARKER_KEY) then -- Existing conditional logic
+            elseif string.find(k, "_") and k ~= WILDCARD_ACTION_MARKER_KEY and string.len(k) >= 3 and k:sub(2, 2) == "_" then
                 local key = k:sub(1, 1)
                 local cond = k:sub(3)
                 if conditionalActions == nil then conditionalActions = {} end
                 local actionString = v
                 if type(v) == "table" then
-                    actionString = v[1] -- Assuming the first element is the action string
+                    actionString = v[1]
                 end
-                -- getActionAndLabel returns actionExecutor, label
-                local actionExecutorForCond, labelForCond = getActionAndLabel(actionString)
                 if conditionalActions[key] then
-                    conditionalActions[key][cond] = { actionExecutorForCond, labelForCond }
+                    conditionalActions[key][cond] = getActionAndLabel(actionString)
                 else
-                    conditionalActions[key] = { [cond] = { actionExecutorForCond, labelForCond } }
+                    conditionalActions[key] = { [cond] = getActionAndLabel(actionString) }
                 end
             elseif type(v) == "string" then
-                local actionExecutor, label = getActionAndLabel(v)
-                keyMap[singleKey(k, label)] = actionExecutor
-            elseif type(v) == "table" and v[1] then -- Array form: ["action_string", "Custom Label"]
-                local actionExecutor, defaultLabel = getActionAndLabel(v[1])
-                keyMap[singleKey(k, v[2] or defaultLabel)] = actionExecutor
-            else -- Nested table for sub-menu
+                local action, label = getActionAndLabel(v)
+                keyMap[singleKey(k, label)] = action
+            elseif type(v) == "table" and v[1] then
+                local action, defaultLabel = getActionAndLabel(v[1])
+                keyMap[singleKey(k, v[2] or defaultLabel)] = action
+            else
                 keyMap[singleKey(k, v.label or k)] = parseKeyMap(v)
             end
         end
 
-        -- Process conditional actions (modified to use actionExecutor)
+        -- parse labels and default action for conditional actions
+        local conditionalLabels = {}
         if conditionalActions ~= nil then
-            local conditionalKeyMapEntries = {} -- Store resolved conditional actions here
-
-            for keyChar, conditions in pairs(conditionalActions) do
-                local defaultActionExecutor = nil
-                local defaultLabel = keyChar .. " (cond)"
-                local specificKeyDef = nil -- To find the original singleKey definition for the label
-
-                -- Check if there's a non-conditional entry for this keyChar to get its label and default action
-                for sk, actExec in pairs(keyMap) do
-                    if type(sk) == "table" and sk[2] == keyChar then -- sk is {mods, key, label}
-                        defaultActionExecutor = actExec              -- This is an actionExecutor
-                        defaultLabel = sk[3]
-                        specificKeyDef = sk
-                        break
-                    end
+            -- get the default action if it exists
+            for key_, value_ in pairs(keyMap) do
+                if conditionalActions[key_[2]] then
+                    conditionalActions[key_[2]]["_"] = value_
+                    keyMap[key_] = nil
+                    conditionalLabels[key_[2]] = key_[3]
                 end
-                if specificKeyDef then keyMap[specificKeyDef] = nil end -- Remove original, will be replaced by conditional wrapper
-
-                -- Prepare the conditional action executor
-                conditionalKeyMapEntries[singleKey(keyChar, defaultLabel)] = function(pressedKeyValue) -- Wrapper takes pressedKeyValue
-                    -- Note: conditional logic itself doesn't use pressedKeyValue from wildcard.
-                    -- The *actions within* the conditions might, if their templates used {KEY}.
-                    if pressedKeyValue then
-                        hs.alert.show("Hammerflow: Warning",
-                            "{KEY} not directly applicable to conditional branches, but actions within might use it.", 2)
-                    end
-
+            end
+            -- add conditionalActions to keyMap
+            for key_, value_ in pairs(conditionalActions) do
+                keyMap[singleKey(key_, conditionalLabels[key_] or "conditional")] = function()
                     local fallback = true
-                    for condName, actionData in pairs(conditions) do
-                        local actionToRun = actionData[1] -- This is an actionExecutor
-                        local actionLabel = actionData[2] -- Not used here, but good to have
-
-                        local conditionMet = false
-                        if obj._userFunctions[condName] and obj._userFunctions[condName]() then
-                            conditionMet = true
-                        elseif obj._userFunctions[condName] == nil and isApp(condName)() then
-                            conditionMet = true
-                        end
-
-                        if conditionMet then
-                            actionToRun() -- Call the actionExecutor (it will handle its own {KEY} if it was a template)
+                    for cond, fn in pairs(value_) do
+                        if (obj._userFunctions[cond] and obj._userFunctions[cond]())
+                            or (obj._userFunctions[cond] == nil and isApp(cond)())
+                        then
+                            fn()
                             fallback = false
                             break
                         end
                     end
-                    if fallback and defaultActionExecutor then
-                        defaultActionExecutor() -- Call the default actionExecutor
-                    elseif fallback then
-                        hs.alert("Hammerflow: No condition met for '" .. keyChar .. "' and no default action.", 2)
+                    if fallback and value_["_"] then
+                        value_["_"]()
                     end
                 end
             end
-            -- Add resolved conditional actions to keyMap
-            for k_cond, v_cond_exec in pairs(conditionalKeyMapEntries) do
-                keyMap[k_cond] = v_cond_exec
-            end
         end
 
-        -- Add apps to userFunctions if there isn't a function with the same name
-        for k_app, v_app in pairs(obj._apps) do
-            if obj._userFunctions[k_app] == nil then
-                obj._userFunctions[k_app] = isApp(v_app)
+        -- add apps to userFunctions if there isn't a function with the same name
+        for k, v in pairs(obj._apps) do
+            if obj._userFunctions[k] == nil then
+                obj._userFunctions[k] = isApp(v)
             end
         end
 
@@ -475,9 +421,21 @@ function obj.registerFunctions(...)
     for _, funcs in pairs({ ... }) do
         for k, v in pairs(funcs) do
             obj._userFunctions[k] = v
-            hs.alert.show("🚨Aerospace Functions Loading")
         end
     end
+end
+
+--- Register UI formatting using standard Hammerspoon syntax (see documentation links below).
+---
+--- NOTE: this must be called before Hammerflow.loadFirstValidTomlFile().
+---
+--- Alert Default Styling Docs: https://www.hammerspoon.org/docs/hs.alert.html#defaultStyle
+--- Text Styling Docs: https://www.hammerspoon.org/docs/hs.styledtext.html
+--- Color Styling Docs: https://www.hammerspoon.org/docs/hs.drawing.color.html
+---
+---@param opts table UI formatting options
+function obj.registerFormat(opts)
+    obj._ui_format = opts or {}
 end
 
 return obj

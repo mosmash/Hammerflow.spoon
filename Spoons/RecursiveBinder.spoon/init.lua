@@ -37,7 +37,9 @@ obj.helperEntryLengthInChar = 20
 --- RecursiveBinder.helperFormat
 --- Variable
 --- format of helper, the helper is just a hs.alert
---- default to {atScreenEdge=2,
+---
+--- Notes:
+---  * default to {atScreenEdge=2,
 ---             strokeColor={ white = 0, alpha = 2 },
 ---             textFont='SF Mono'
 ---             textSize=20}
@@ -56,7 +58,9 @@ obj.showBindHelper = true
 --- RecursiveBinder.helperModifierMapping()
 --- Variable
 --- The mapping used to display modifiers on helper.
---- Default to {
+---
+--- Notes:
+---  * Default to {
 ---  command = '⌘',
 ---  control = '⌃',
 ---  option = '⌥',
@@ -367,16 +371,21 @@ function obj.recursiveBind(keymap, modals)
             -- F-keys if desired
         }
         for _, key_name in ipairs(otherDirectKeys) do
-            modal:bind({}, key_name, function()
-                -- For these, we generally expect them as-is.
-                -- getCharacterWithModifiers will handle if shift was unexpectedly pressed
-                -- with keys like '-' to produce '_'.
-                local actualCharTyped = getCharacterWithModifiers(key_name)
-                modal:exit()
-                killHelper()
-                wildcardActionExecutor(actualCharTyped)
+            -- Skip invalid keys that Hammerspoon can't bind
+            local success = pcall(function()
+                modal:bind({}, key_name, function()
+                    -- For these, we generally expect them as-is.
+                    -- getCharacterWithModifiers will handle if shift was unexpectedly pressed
+                    -- with keys like '-' to produce '_'.
+                    local actualCharTyped = getCharacterWithModifiers(key_name)
+                    modal:exit()
+                    killHelper()
+                    wildcardActionExecutor(actualCharTyped)
+                end)
             end)
-            table.insert(keyFuncNameTableAddition, key_name)
+            if success then
+                table.insert(keyFuncNameTableAddition, key_name)
+            end
         end
 
         -- 6. Bind SHIFT + other direct symbols (e.g. Shift + - = _)
@@ -384,19 +393,23 @@ function obj.recursiveBind(keymap, modals)
         -- but are not numbers.
         local symbolsWithShiftVariant = { "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`" }
         for _, base_sym in ipairs(symbolsWithShiftVariant) do
-            modal:bind({ "shift" }, base_sym, function()
-                local actualCharTyped = getCharacterWithModifiers(base_sym)
-                modal:exit()
-                killHelper()
-                wildcardActionExecutor(actualCharTyped)
+            -- Skip invalid keys that Hammerspoon can't bind
+            local success = pcall(function()
+                modal:bind({ "shift" }, base_sym, function()
+                    local actualCharTyped = getCharacterWithModifiers(base_sym)
+                    modal:exit()
+                    killHelper()
+                    wildcardActionExecutor(actualCharTyped)
+                end)
             end)
-            table.insert(keyFuncNameTableAddition, keyboardUpper(base_sym))
+            if success then
+                table.insert(keyFuncNameTableAddition, keyboardUpper(base_sym))
+            end
         end
 
 
         keyFuncNameTable["ANY KEY (case-sens, incl. Shift-sym)"] = wildcardLabel -- Keep or refine this label
         -- You could populate keyFuncNameTable more dynamically here if needed, using keyFuncNameTableAddition
-        hs.alert("RB: Finished wildcard bindings.", 3)
         -- Ensure escape still works for wildcard modals
         modal:bind(obj.escapeKey[1], obj.escapeKey[2], function()
             modal:exit()
@@ -415,11 +428,15 @@ function obj.recursiveBind(keymap, modals)
                 actionToExecute = map_or_action
             end
 
-            modal:bind(key_spec[1], key_spec[2], function()
-                modal:exit()
-                killHelper()
-                actionToExecute() -- Call with no arguments, as pressedKeyValue is nil for specific keys
+            -- Skip invalid keys that Hammerspoon can't bind
+            local success = pcall(function()
+                modal:bind(key_spec[1], key_spec[2], function()
+                    modal:exit()
+                    killHelper()
+                    actionToExecute() -- Call with no arguments, as pressedKeyValue is nil for specific keys
+                end)
             end)
+            -- Silently skip invalid keys
 
             if #key_spec >= 3 then
                 keyFuncNameTable[createKeyName(key_spec)] = key_spec[3]
