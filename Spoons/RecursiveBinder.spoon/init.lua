@@ -224,9 +224,7 @@ end
 -- show helper of available keys of current layer
 local function showHelper(keyFuncNameTable)
     -- keyFuncNameTable is a table that key is key name and value is description
-    local helper = ''
-    local separator = '' -- first loop doesn't need to add a separator, because it is in the very front.
-    local lastLine = ''
+    local styledParts = {}
     local count = 0
 
     local sortedKeyFuncNameTable = {}
@@ -239,25 +237,57 @@ local function showHelper(keyFuncNameTable)
         local keyName = value.keyName
         local funcName = value.funcName
         count = count + 1
-        local newEntry = keyName .. ' → ' .. funcName
-        -- make sure each entry is of the same length
-        if string.len(newEntry) > obj.helperEntryLengthInChar then
-            newEntry = string.sub(newEntry, 1, obj.helperEntryLengthInChar - 2) .. '..'
-        elseif string.len(newEntry) < obj.helperEntryLengthInChar then
-            newEntry = newEntry .. string.rep(' ', obj.helperEntryLengthInChar - string.len(newEntry))
+
+        -- Style submenus differently with color and symbol
+        local isSubmenu = funcName:match("^%[.+%]$")
+
+        -- Add separator (but not before the first item)
+        if count > 1 then
+            if (count - 1) % obj.helperEntryEachLine == 0 then
+                table.insert(styledParts, '\n')  -- New line without leading space
+            else
+                table.insert(styledParts, '  ')   -- Double space between items
+            end
         end
-        -- create new line for every helperEntryEachLine entries
-        if count % (obj.helperEntryEachLine + 1) == 0 then
-            separator = '\n '
-        elseif count == 1 then
-            separator = ' '
+
+        -- Create the entry with appropriate styling
+        if isSubmenu then
+            -- Submenu: colored in mauve with chevron and remove brackets
+            local cleanName = funcName:gsub("^%[(.+)%]$", "%1")
+            local entry = keyName .. ' ▸ ' .. cleanName
+            if string.len(entry) > obj.helperEntryLengthInChar then
+                entry = string.sub(entry, 1, obj.helperEntryLengthInChar - 2) .. '..'
+            elseif string.len(entry) < obj.helperEntryLengthInChar then
+                entry = entry .. string.rep(' ', obj.helperEntryLengthInChar - string.len(entry))
+            end
+            local styledEntry = hs.styledtext.new(entry, {
+                color = { hex = "#cba6f7" },  -- Catppuccin mauve
+                font = { name = obj.helperFormat.textFont or "SF Mono", size = obj.helperFormat.textSize or 20 }
+            })
+            table.insert(styledParts, styledEntry)
         else
-            separator = '  '
+            -- Regular action: normal text color from format config
+            local entry = keyName .. ' → ' .. funcName
+            if string.len(entry) > obj.helperEntryLengthInChar then
+                entry = string.sub(entry, 1, obj.helperEntryLengthInChar - 2) .. '..'
+            elseif string.len(entry) < obj.helperEntryLengthInChar then
+                entry = entry .. string.rep(' ', obj.helperEntryLengthInChar - string.len(entry))
+            end
+            local styledEntry = hs.styledtext.new(entry, {
+                color = obj.helperFormat.textColor or { hex = "#cdd6f4" },
+                font = { name = obj.helperFormat.textFont or "SF Mono", size = obj.helperFormat.textSize or 20 }
+            })
+            table.insert(styledParts, styledEntry)
         end
-        helper = helper .. separator .. newEntry
     end
-    helper = string.match(helper, '[^\n].+$')
-    previousHelperID = hs.alert.show(helper, obj.helperFormat, true)
+
+    -- Combine all styled parts
+    local styledHelper = hs.styledtext.new(table.concat({}), obj.helperFormat.textStyle or {})
+    for _, part in ipairs(styledParts) do
+        styledHelper = styledHelper .. part
+    end
+
+    previousHelperID = hs.alert.show(styledHelper, obj.helperFormat, true)
 end
 
 local function killHelper()
